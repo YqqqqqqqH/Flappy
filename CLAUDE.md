@@ -7,6 +7,7 @@ Three.js 3D 小游戏：玩家用空格 / 点击 / 触屏让小鸟扇翅，穿�
 - 网页版已发布为 Claude Artifact：https://claude.ai/code/artifact/b7eb9848-a786-4e1c-b715-2243a6835099
   （本会话直接重新发布同一文件即可更新；其他会话发布时要把该 URL 作为 `url` 传入，否则会新建 artifact）
 - GitHub：https://github.com/YqqqqqqqH/Flappy（**public**，分支 `main`，remote `origin`）。不要提交任何密钥。
+  remote URL 写成 `https://YqqqqqqqH@github.com/...`，让 Git Credential Manager 用 YqqqqqqqH 账号的凭据；这台机器默认缓存的是 Felix-Yang887，它没有该仓库写权限（直接推会 403）。
 - 游戏内 UI 文案是英文；和用户交流用中文。
 
 ## 文件
@@ -88,10 +89,12 @@ Three.js 3D 小游戏：玩家用空格 / 点击 / 触屏让小鸟扇翅，穿�
   - 草地贴图：`wx.createOffscreenCanvas` 画好后 `getImageData` → `DataTexture`；失败退回纯色地面。阴影贴图 1024（网页版 2048）；不监听尺寸变化；输入只有 canvas `touchstart` 和按钮 `catchtap`。
   - 没有自定义字体和贴纸风描边，toast 无动画（定时器 1.1 s 隐藏）。
 - **HUD 触摸穿透规则**：`.hud` 是 `pointer-events: none`，只有 `.card / .mode-btn / .mute-btn` 显式设 `auto`。不要再写 `.hud > view { pointer-events: auto }` 这种高优先级规则——它曾经盖掉了分数、toast、生命的 `none`，导致点屏幕顶部不能扇翅。新加可点元素时给它单独加 `pointer-events: auto`。
-- 发版（上传开发版本）：开发者工具 CLI 在 `D:\微信web开发者工具\cli.bat`，需要开发者工具已登录且「设置 → 安全设置 → 服务端口」已开启。
+- 发版（上传开发版本）：开发者工具 CLI 在 `D:\微信web开发者工具\cli.bat`，需要「设置 → 安全设置 → 服务端口」已开启（用户已开）且已登录。
+  - `cli.bat islogin` 查登录；未登录时 `cli.bat login --qr-format image --qr-output <png>` 生成二维码让用户扫码（二维码文件用完即删，别提交）。
   - `cli.bat upload --project C:\Users\Yqh\Desktop\Flappy\miniprogram -v <版本号> -d "<备注>"`
   - 上传后在 mp.weixin.qq.com「管理 → 版本管理」里设为体验版 / 提交审核。**提交审核和发布上线必须由用户明确要求。**
-  - 版本记录：`1.0.0`（2026-09-15，体验版）。
+  - 版本记录：`1.0.0`（2026-09-15，体验版）；`1.0.1`（2026-10-02，奖牌显示 + 分数弹跳 + 顶部触摸穿透修复，613.8 KB）。
+- 已知环境问题（2026-10-02）：这台机器上开发者工具的模拟器只显示 "something wrong in electron"、页面完全不渲染（连背景色都没有，控制台无编译错误），所以没法在模拟器里看画面；视觉验证要靠真机预览 / 体验版。
 
 ## 约定
 
