@@ -19,6 +19,7 @@ Three.js 3D 小游戏：玩家用空格 / 点击 / 触屏让小鸟扇翅，穿�
 | `index.html` | 生成物。加了标准 HTML 外壳，可直接双击在浏览器里玩。 |
 | `dev.html` | 生成物。同 index，另外暴露 `window.__dbg`（游戏内部句柄）和 `window.__events`（标记触发日志），用于脚本化测试。 |
 | `miniprogram/` | 微信小程序工程根目录（用微信开发者工具打开这个目录，不是仓库根）。见下文「微信小程序版」。 |
+| `mp-harness.html` | 小程序测试页：在桌面浏览器里用小程序同款 threejs-miniprogram（r108）跑 `miniprogram/pages/game/game.js`（`wx` / `Page` 是桩）。见「微信小程序版」。 |
 | `.claude/launch.json` | Browser 预览用的本地静态服务器（`python -m http.server 8765`）。 |
 | `.gitattributes` | 全仓库强制 LF（用户全局 `core.autocrlf=true`，不加会和 `build.py` 写出的 LF 打架）。 |
 
@@ -86,15 +87,19 @@ Three.js 3D 小游戏：玩家用空格 / 点击 / 触屏让小鸟扇翅，穿�
   - 网页版的 `start / flap` 在这里叫 `gameStart / gameFlap`。
   - UI 全部走 `pageSelf.setData`（`gameState / score / scorePop / showToast / showOver / showMedal / medalText / medalColor / showLives / livesActive / showModeSelect / showModeInfo ...`），WXML 按数据渲染。
   - 音效用 `wx.createWebAudioContext()`（音色同网页版）；存储用 `wx.getStorageSync / setStorageSync`，键名同网页版。
-  - 草地贴图：`wx.createOffscreenCanvas` 画好后 `getImageData` → `DataTexture`；失败退回纯色地面。阴影贴图 1024（网页版 2048）；不监听尺寸变化；输入只有 canvas `touchstart` 和按钮 `catchtap`。
+  - 草地贴图：`wx.createOffscreenCanvas` 画好后 `getImageData` → `DataTexture`；失败退回纯色地面。不监听尺寸变化；输入只有 canvas `touchstart` 和按钮 `catchtap`。
+  - **不开阴影**（`renderer.shadowMap.enabled = false`，太阳光不投影）。各物体的 `castShadow / receiveShadow` 保留只为和网页版代码一致，关着时不起作用。原因见下面「已知问题」，不要再打开。
   - 没有自定义字体和贴纸风描边，toast 无动画（定时器 1.1 s 隐藏）。
 - **HUD 触摸穿透规则**：`.hud` 是 `pointer-events: none`，只有 `.card / .mode-btn / .mute-btn` 显式设 `auto`。不要再写 `.hud > view { pointer-events: auto }` 这种高优先级规则——它曾经盖掉了分数、toast、生命的 `none`，导致点屏幕顶部不能扇翅。新加可点元素时给它单独加 `pointer-events: auto`。
 - 发版（上传开发版本）：开发者工具 CLI 在 `D:\微信web开发者工具\cli.bat`，需要「设置 → 安全设置 → 服务端口」已开启（用户已开）且已登录。
   - `cli.bat islogin` 查登录；未登录时 `cli.bat login --qr-format image --qr-output <png>` 生成二维码让用户扫码（二维码文件用完即删，别提交）。
   - `cli.bat upload --project C:\Users\Yqh\Desktop\Flappy\miniprogram -v <版本号> -d "<备注>"`
   - 上传后在 mp.weixin.qq.com「管理 → 版本管理」里设为体验版 / 提交审核。**提交审核和发布上线必须由用户明确要求。**
-  - 版本记录：`1.0.0`（2026-09-15，体验版）；`1.0.1`（2026-10-02，奖牌显示 + 分数弹跳 + 顶部触摸穿透修复，613.8 KB）。
-- 已知环境问题（2026-10-02）：这台机器上开发者工具的模拟器只显示 "something wrong in electron"、页面完全不渲染（连背景色都没有，控制台无编译错误），所以没法在模拟器里看画面；视觉验证要靠真机预览 / 体验版。
+  - 只想让用户在手机上试、不想动体验版时，用 `cli.bat preview --project ... --qr-format image --qr-output <png>` 生成预览二维码发给用户扫。
+  - 版本记录：`1.0.0`（2026-09-15，体验版）；`1.0.1`（2026-10-02，奖牌显示 + 分数弹跳 + 顶部触摸穿透修复，613.8 KB）；`1.0.2`（2026-10-02，关闭阴影修复 iPhone 上管道不显示）。
+- 本地看画面：开发者工具的模拟器在这台机器上只显示 "something wrong in electron"、完全不渲染，用 `mp-harness.html` 代替：`python -m http.server 8765` → http://localhost:8765/mp-harness.html?w=402&h=874（`w/h/dpr` 是桩报告的屏幕尺寸）。`window.__mp.play(mode)` 开局，`__mp.tick(n, dt)` 驱动真实的 `frame()`（Browser pane 不跑 rAF），`game.js` 的顶层变量（`pipes / state / renderer / scene ...`）可直接读写。它只能复现 r108 逻辑和桌面 GPU 的渲染，**手机 GPU 的问题要上真机**。
+- **已知问题：iPhone 上阴影导致管道消失**（2026-10-02，iPhone 17 / Apple A19 GPU / iOS 26.6.2 / 微信 8.0.73 / 基础库 3.16.3）：开阴影时管道和管口完全不显示，其他物体正常。管道是场景里唯一既投影又接收阴影的平面着色物体，r108 会给它单独生成一个 `FLAT_SHADED + USE_SHADOWMAP (PCF soft)` 着色器程序（程序本身能链接成功）。在真机上把阴影全关后一切正常，所以小程序版不开阴影。桌面浏览器（含 `mp-harness.html`）复现不了这个问题。
+  - 当时的诊断办法（已删除，需要时重建）：临时加 `pages/game/debug.js`，只在 `wx.getAccountInfoSync().miniProgram.envVersion === 'develop'`（预览版）时挂上；在屏幕上显示机型、GPU、WebGL 上限、着色器程序列表 / 链接状态、截获的 `console.error`、管道 x 坐标和原始 rAF 时间戳；点面板可以切换几种渲染方案（管道不接收阴影 / 全关阴影 / 管道平滑着色 / 管道 MeshBasic）。用 `cli.bat preview` 发到用户手机上，一张截图就够定位。
 
 ## 约定
 

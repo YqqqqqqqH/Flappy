@@ -1,0 +1,90 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mini program harness</title>
+<style>
+  body { margin: 0; background: #222; color: #eee; font: 12px/1.4 system-ui, sans-serif; display: flex; gap: 16px; padding: 12px; }
+  #webgl { width: 390px; height: 844px; display: block; background: #000; }
+  pre { margin: 0; white-space: pre-wrap; max-width: 520px; }
+</style>
+</head>
+<body>
+<!--
+  Runs miniprogram/pages/game/game.js in a desktop browser, on the same
+  threejs-miniprogram (three r108) bundle the mini program ships, with tiny
+  wx / Page stubs. WeChat DevTools' simulator does not render on this machine,
+  so this is the scripted way to look at the mini program's 3D scene.
+
+  python -m http.server 8765  →  http://localhost:8765/mp-harness.html
+  Query: ?w=390&h=844&dpr=1   (viewport size the stubbed wx.getSystemInfoSync reports)
+
+  window.__mp:
+    page                 the Page instance (page.data mirrors setData)
+    tick(n, dt)          run n frames of the real frame() loop, dt seconds apart
+    play(mode)           selectMode + Enter, i.e. start a run ('competitive' | 'casual')
+  game.js top-level bindings (pipes, state, birdY, renderer, scene, camera, ...)
+  are script-scoped globals, so they can be read and called directly too.
+-->
+<canvas id="webgl"></canvas>
+<pre id="log"></pre>
+<script>var exports = {};</script>
+<script src="miniprogram/miniprogram_npm/threejs-miniprogram/index.js"></script>
+<script>
+(() => {
+  const q = new URLSearchParams(location.search);
+  const W = +q.get('w') || 390, H = +q.get('h') || 844, DPR = +q.get('dpr') || 1;
+  const canvasEl = document.getElementById('webgl');
+  canvasEl.setAttribute('style', `width:${W}px;height:${H}px`);
+  canvasEl.requestAnimationFrame = () => 0;   // frames are driven by __mp.tick()
+  canvasEl.cancelAnimationFrame = () => {};
+
+  const logEl = document.getElementById('log');
+  const log = (...a) => { logEl.textContent += a.join(' ') + '\n'; };
+  for (const k of ['error', 'warn']) {
+    const orig = console[k].bind(console);
+    console[k] = (...a) => { log('[' + k + ']', ...a.map(String)); orig(...a); };
+  }
+  window.addEventListener('error', e => log('[uncaught]', e.message));
+
+  const tm = exports;
+  window.require = () => tm;
+  let pageDef = null;
+  window.Page = def => { pageDef = def; };
+  const store = {};
+  window.wx = {
+    getStorageSync: k => store[k] || '',
+    setStorageSync: (k, v) => { store[k] = v; },
+    getSystemInfoSync: () => ({ pixelRatio: DPR, windowWidth: W, windowHeight: H }),
+    createSelectorQuery: () => ({ select: () => ({ node: () => ({ exec: cb => cb([{ node: canvasEl }]) }) }) }),
+    createOffscreenCanvas: ({ width, height }) => { const c = document.createElement('canvas'); c.width = width; c.height = height; return c; },
+    createWebAudioContext: () => { throw new Error('audio disabled in harness'); }
+  };
+  window.__harness = { canvasEl, log, getPageDef: () => pageDef };
+})();
+</script>
+<script>
+  // cache-bust so edits to game.js show up on reload (python's http.server lets the browser cache it)
+  document.write('<script src="miniprogram/pages/game/game.js?' + Date.now() + '"><\/script>');
+</script>
+<script>
+(() => {
+  const def = __harness.getPageDef();
+  const page = Object.create(def);
+  page.data = JSON.parse(JSON.stringify(def.data));
+  page.setData = function (d) { Object.assign(this.data, d); };
+  page.onLoad();
+  page.onReady();
+  let ts = 1000;
+  window.__mp = {
+    page,
+    tick(n = 1, dt = 1 / 60) { for (let i = 0; i < n; i++) { ts += dt * 1000; frame(__harness.canvasEl, ts); } },
+    play(mode = 'competitive') { selectMode(mode); startFromModeInfo(); }
+  };
+  __mp.tick(2);
+  __harness.log('harness ready; three r' + THREE.REVISION);
+})();
+</script>
+</body>
+</html>

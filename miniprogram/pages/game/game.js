@@ -186,8 +186,10 @@ function initScene(canvas, w, h, dpr) {
   renderer.setPixelRatio(dpr)
   renderer.setSize(w, h, false)
   renderer.outputEncoding = THREE.sRGBEncoding
-  renderer.shadowMap.enabled = true
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+  // No shadows in the mini program: on iPhone (Apple A19, iOS 26) the r108 shadow path made the
+  // pipes vanish, and turning shadows off fixed it on device. The per-mesh castShadow /
+  // receiveShadow flags are kept to match the web version; they are no-ops while this is off.
+  renderer.shadowMap.enabled = false
 
   scene = new THREE.Scene()
   scene.fog = new THREE.Fog(col('#ffd9b4'), 30, 130)
@@ -204,11 +206,6 @@ function initScene(canvas, w, h, dpr) {
   sunLight = new THREE.DirectionalLight(col('#fff3d8'), 0.95)
   sunLight.position.set(12, 18, 4)
   sunLight.target.position.set(4, 0, 0)
-  sunLight.castShadow = true
-  sunLight.shadow.mapSize.set(1024, 1024)
-  Object.assign(sunLight.shadow.camera, { left: -22, right: 22, top: 20, bottom: -16, near: 1, far: 70 })
-  sunLight.shadow.bias = -0.0004
-  sunLight.shadow.normalBias = 0.03
   scene.add(sunLight, sunLight.target)
 
   sky = new THREE.Mesh(
