@@ -21,9 +21,8 @@
   z-index: 100;
   pointer-events: none;
 }
-.hud > view {
-  pointer-events: auto;
-}
+/* Overlays let touches fall through to the canvas; only the interactive
+   pieces (.card, .mode-btn, .mute-btn) opt back in with pointer-events: auto. */
 
 .display {
   font-weight: 900;
@@ -41,6 +40,12 @@
   color: #fff;
   z-index: 101;
   pointer-events: none;
+}
+.score.pop { animation: pop 0.3s cubic-bezier(0.2, 1.7, 0.4, 1); }
+@keyframes pop {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.28); }
+  100% { transform: scale(1); }
 }
 
 .toast {
@@ -118,6 +123,7 @@
   box-sizing: border-box;
   text-align: center;
   z-index: 103;
+  pointer-events: auto;
 }
 .eyebrow {
   font-weight: 900;
@@ -146,6 +152,27 @@
   font-weight: 900;
   font-size: 64rpx;
   color: #1f2b3d;
+}
+.medal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20rpx;
+  min-height: 56rpx;
+  margin-bottom: 8rpx;
+  font-weight: 800;
+  font-size: 26rpx;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #1f2b3d;
+}
+.disc {
+  width: 44rpx;
+  height: 44rpx;
+  border-radius: 50%;
+  border: 4rpx solid #1f2b3d;
+  box-shadow: inset -6rpx -6rpx 0 rgba(0, 0, 0, 0.18);
+  box-sizing: border-box;
 }
 .ribbon {
   margin-top: 12rpx;
@@ -183,6 +210,7 @@
   border-radius: 32rpx;
   padding: 28rpx 44rpx 24rpx;
   color: #1f2b3d;
+  pointer-events: auto;
 }
 .mode-icon { font-size: 52rpx; line-height: 1.1; }
 .mode-name { font-weight: 900; font-size: 34rpx; letter-spacing: 0.02em; }
@@ -232,5 +260,6 @@
   text-align: center;
   line-height: 80rpx;
   z-index: 104;
+  pointer-events: auto;
 }
 .mute-icon { font-size: 36rpx; }

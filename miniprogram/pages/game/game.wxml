@@ -4,7 +4,7 @@
 
   <view class="hud">
     <view wx:if="{{gameState !== 'ready'}}"
-      class="score display">{{score}}</view>
+      class="score display {{scorePop ? 'pop' : ''}}">{{score}}</view>
 
     <view wx:if="{{showToast}}" class="toast {{toastKind}}">{{toastText}}</view>
 
@@ -58,6 +58,10 @@
           <view class="lbl">Best</view>
           <view class="num">{{best}}</view>
         </view>
+      </view>
+      <view wx:if="{{showMedal}}" class="medal">
+        <view class="disc" style="background-color: {{medalColor}};"></view>
+        <text>{{medalText}}</text>
       </view>
       <view wx:if="{{isNewBest && score > 0}}" class="ribbon">New best!</view>
       <view class="btn" catchtap="onPlayAgain">Play again</view>
