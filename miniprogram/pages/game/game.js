@@ -1,0 +1,947 @@
+const { createScopedThreejs } = require('../../miniprogram_npm/threejs-miniprogram/index')
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
+const rand  = (a, b) => a + Math.random() * (b - a)
+const lerp  = (a, b, t) => a + (b - a) * t
+const pick  = arr => arr[Math.floor(Math.random() * arr.length)]
+const DEG   = Math.PI / 180
+
+const GROUND_Y = -3.5, CEIL_Y = 7.4, GRAVITY = -30, FLAP_V = 9.6, MAX_FALL = -17, BIRD_R = 0.42
+const PIPE_R = 0.9, RIM_R = 1.08, RIM_H = 0.7, PIPE_COUNT = 8, START_X = 15
+const CLIMB_RATE = 3.5, FALL_RATE = 10.0
+const DANGER_W = 2 * (RIM_R - 0.04 + BIRD_R)
+const S_FLOOR = 5.0, S_CEIL = 12.0
+const CAM_X = 3.2, CAM_LOOK_X = 4.4, GROUND_W = 600, GROUND_D = 240, TILE = 8
+const MAX_GAPS = 5, WARMUP_COLUMNS = 2, MIN_MID = 0.6
+
+let THREE
+let col
+let renderer, scene, camera
+let camDist = 15, camY = 2.2
+let lookTarget = null
+let ground, groundTex, sky, sunLight
+let bird, wingL, wingR
+
+const layers = { near: [], mid: [], far: [], clouds: [] }
+const pipes = []
+const particles = []
+
+let pMats, dotGeo, featherGeo
+
+let state = 'ready', score = 0, vy = 0, birdY = 1, t = 0, deathTime = 0, readyT = 0
+let speed = 6, flapPhase = 0, flapBoost = 0, shake = 0, lastAction = 0
+let last = 0, rafId = null
+let gameMode = null, showingModeInfo = false
+let lives = 0, invincible = 0
+const INVINCIBLE_TIME = 2.0, MAX_LIVES = 3
+
+let lastGapY = 1.2, columnsMade = 0, lastGapCount = 1, lastPlacedGaps = []
+
+let audioCtx = null, masterGain = null
+let pageSelf = null
+
+/* ===== audio (synthesized, wx.createWebAudioContext) ===== */
+function ensureAudio(muted) {
+  if (!audioCtx) {
+    try {
+      audioCtx = wx.createWebAudioContext()
+      masterGain = audioCtx.createGain()
+      masterGain.gain.value = muted ? 0 : 0.5
+      masterGain.connect(audioCtx.destination)
+    } catch (e) { return false }
+  }
+  if (audioCtx.state === 'suspended') audioCtx.resume()
+  return true
+}
+function setAudioMuted(m) { if (masterGain) masterGain.gain.value = m ? 0 : 0.5 }
+function tone(type, f0, f1, dur, vol, delay) {
+  if (!audioCtx) return
+  delay = delay || 0
+  const t0 = audioCtx.currentTime + delay, o = audioCtx.createOscillator(), g = audioCtx.createGain()
+  o.type = type; o.frequency.setValueAtTime(f0, t0); o.frequency.exponentialRampToValueAtTime(f1, t0 + dur)
+  g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(vol, t0 + 0.012); g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur)
+  o.connect(g); g.connect(masterGain); o.start(t0); o.stop(t0 + dur + 0.05)
+}
+function noise(dur, vol, freq, delay) {
+  if (!audioCtx) return
+  delay = delay || 0
+  const t0 = audioCtx.currentTime + delay, n = Math.floor(audioCtx.sampleRate * dur)
+  const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate), d = buf.getChannelData(0)
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n)
+  const src = audioCtx.createBufferSource(); src.buffer = buf
+  const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = 0.9
+  const g = audioCtx.createGain(); g.gain.value = vol
+  src.connect(f); f.connect(g); g.connect(masterGain); src.start(t0)
+}
+const Sfx = {
+  flap()   { tone('triangle', 380, 900, 0.1, 0.16); noise(0.09, 0.14, 1800) },
+  score()  { tone('sine', 988, 988, 0.08, 0.16); tone('sine', 1319, 1319, 0.14, 0.16, 0.075) },
+  hit()    { tone('sawtooth', 190, 45, 0.28, 0.28); noise(0.22, 0.3, 500) },
+  reward() { tone('sine', 660, 660, 0.07, 0.15); tone('sine', 880, 880, 0.07, 0.15, 0.07); tone('sine', 1320, 1320, 0.18, 0.15, 0.14) },
+  punish() { tone('square', 240, 90, 0.3, 0.12); noise(0.25, 0.18, 350) },
+  swoosh() { noise(0.25, 0.08, 900) }
+}
+
+/* ===== shared geometry & materials (created after THREE is ready) ===== */
+let std, coneGeo, blobGeo, puffGeo, trunkGeo, trunkMat, leafMats, flowerMats, cloudMat
+let hillMatsMid, hillMatsFar
+let pipeMat, rimMat, pipeGeo, rimGeo
+let starMat, thornMat, spikeMat, starGeo, spikeGeo, coreGeo, spikeDirs, UP
+
+function initMaterials() {
+  std = (hex, extra) => {
+    const opts = Object.assign({ color: col(hex), roughness: 0.8, metalness: 0, flatShading: true }, extra || {})
+    return new THREE.MeshStandardMaterial(opts)
+  }
+  coneGeo = new THREE.ConeGeometry(1, 1, 7)
+  blobGeo = new THREE.IcosahedronGeometry(1, 1)
+  puffGeo = new THREE.SphereGeometry(1, 7, 5)
+  trunkGeo = new THREE.CylinderGeometry(0.13, 0.18, 0.8, 7)
+  trunkMat = std('#8a5a3c', { roughness: 0.95 })
+  leafMats = ['#3fa564', '#55bd72', '#2f9358', '#6cc77f', '#48b06a'].map(h => std(h, { roughness: 0.85 }))
+  flowerMats = ['#ff8fb1', '#ffd166', '#ffffff', '#ffb3c6'].map(h => std(h, { roughness: 0.7 }))
+  cloudMat = std('#ffffff', { roughness: 1 })
+  hillMatsMid = ['#5fae72', '#6dbb7c', '#57a56c'].map(h => std(h))
+  hillMatsFar = ['#7fb6b9', '#8cc0c0', '#74adb4'].map(h => std(h))
+
+  pipeGeo = new THREE.CylinderGeometry(PIPE_R, PIPE_R, 1, 16, 1)
+  rimGeo = new THREE.CylinderGeometry(RIM_R, RIM_R, RIM_H, 16, 1)
+  pipeMat = std('#4ec46e', { roughness: 0.55, metalness: 0.05 })
+  rimMat = std('#6bdb87', { roughness: 0.5, metalness: 0.05 })
+
+  starMat = std('#ffd23f', { roughness: 0.35, metalness: 0.2, emissive: col('#ff9f1c'), emissiveIntensity: 0.35 })
+  thornMat = std('#8b5cf6', { roughness: 0.5, emissive: col('#3b1d7a'), emissiveIntensity: 0.4 })
+  spikeMat = std('#5b2ea6', { roughness: 0.6 })
+
+  const shape = new THREE.Shape()
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? 0.46 : 0.2, a = i * Math.PI / 5 - Math.PI / 2
+    const x = Math.cos(a) * r, y = Math.sin(a) * r
+    if (i === 0) shape.moveTo(x, y); else shape.lineTo(x, y)
+  }
+  shape.closePath()
+  starGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.16, bevelEnabled: true, bevelThickness: 0.04, bevelSize: 0.04, bevelSegments: 1 })
+  starGeo.center()
+
+  spikeGeo = new THREE.ConeGeometry(0.1, 0.32, 5)
+  coreGeo = new THREE.IcosahedronGeometry(0.3, 0)
+  UP = new THREE.Vector3(0, 1, 0)
+
+  const tmpGeo = new THREE.IcosahedronGeometry(1, 0)
+  const bufGeo = tmpGeo.isBufferGeometry ? tmpGeo : new THREE.BufferGeometry().fromGeometry(tmpGeo)
+  const pos = bufGeo.attributes.position
+  spikeDirs = []
+  const seen = new Set()
+  for (let i = 0; i < pos.count; i++) {
+    const v = new THREE.Vector3().fromBufferAttribute(pos, i)
+    const k = v.toArray().map(n => n.toFixed(2)).join(',')
+    if (!seen.has(k)) { seen.add(k); spikeDirs.push(v.normalize()) }
+  }
+
+  dotGeo = new THREE.SphereGeometry(0.1, 6, 5)
+  featherGeo = new THREE.BoxGeometry(0.26, 0.05, 0.15)
+  pMats = {
+    gold:   new THREE.MeshBasicMaterial({ color: col('#ffd23f') }),
+    white:  new THREE.MeshBasicMaterial({ color: col('#ffffff') }),
+    pink:   new THREE.MeshBasicMaterial({ color: col('#ff8fb1') }),
+    orange: new THREE.MeshBasicMaterial({ color: col('#ff6b35') }),
+    cream:  new THREE.MeshBasicMaterial({ color: col('#fff1d0') }),
+    purple: new THREE.MeshBasicMaterial({ color: col('#8b5cf6') }),
+    violet: new THREE.MeshBasicMaterial({ color: col('#c4b5fd') })
+  }
+}
+
+/* ===== scene builders ===== */
+function makeGrassTexture() {
+  const s = 512
+  let c
+  try { c = wx.createOffscreenCanvas({ type: '2d', width: s, height: s }) } catch (e) { return null }
+  const g = c.getContext('2d')
+  g.fillStyle = '#7cc86a'; g.fillRect(0, 0, s, s)
+  const wrapDraw = fn => { for (const dx of [0, -s, s]) for (const dy of [0, -s, s]) fn(dx, dy) }
+  const tones = ['#72bf61', '#89d477', '#69b85a', '#94db83', '#7fcd6f']
+  for (let i = 0; i < 420; i++) {
+    const x = Math.random() * s, y = Math.random() * s, rx = rand(7, 30), ry = rand(4, 14), a = rand(0, Math.PI)
+    g.fillStyle = tones[i % tones.length]; g.globalAlpha = 0.55
+    wrapDraw((dx, dy) => { g.beginPath(); g.ellipse(x + dx, y + dy, rx, ry, a, 0, Math.PI * 2); g.fill() })
+  }
+  g.globalAlpha = 1
+  const flowers = ['#fff5c2', '#ffd1dc', '#ffffff', '#ffe08a', '#ffb3c6']
+  for (let i = 0; i < 150; i++) {
+    const x = Math.random() * s, y = Math.random() * s, r = rand(1.6, 3.2)
+    g.fillStyle = flowers[i % flowers.length]
+    wrapDraw((dx, dy) => { g.beginPath(); g.arc(x + dx, y + dy, r, 0, Math.PI * 2); g.fill() })
+  }
+  const imgData = g.getImageData(0, 0, s, s)
+  const tex = new THREE.DataTexture(new Uint8Array(imgData.data.buffer), s, s, THREE.RGBAFormat, THREE.UnsignedByteType)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.repeat.set(GROUND_W / TILE, GROUND_D / TILE)
+  tex.encoding = THREE.sRGBEncoding
+  tex.needsUpdate = true
+  return tex
+}
+
+function initScene(canvas, w, h, dpr) {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+  renderer.setPixelRatio(dpr)
+  renderer.setSize(w, h, false)
+  renderer.outputEncoding = THREE.sRGBEncoding
+  renderer.shadowMap.enabled = true
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap
+
+  scene = new THREE.Scene()
+  scene.fog = new THREE.Fog(col('#ffd9b4'), 30, 130)
+
+  camera = new THREE.PerspectiveCamera(46, 1, 0.1, 600)
+  const aspect = w / h
+  camera.aspect = aspect
+  camera.fov = aspect < 1 ? 62 : 46
+  camDist = clamp(10.5 / (Math.tan(camera.fov * 0.5 * DEG) * aspect), 14, 34)
+  camera.updateProjectionMatrix()
+
+  scene.add(new THREE.HemisphereLight(col('#bfe3ff'), col('#7fbf6a'), 0.6))
+  scene.add(new THREE.AmbientLight(col('#ffffff'), 0.1))
+  sunLight = new THREE.DirectionalLight(col('#fff3d8'), 0.95)
+  sunLight.position.set(12, 18, 4)
+  sunLight.target.position.set(4, 0, 0)
+  sunLight.castShadow = true
+  sunLight.shadow.mapSize.set(1024, 1024)
+  Object.assign(sunLight.shadow.camera, { left: -22, right: 22, top: 20, bottom: -16, near: 1, far: 70 })
+  sunLight.shadow.bias = -0.0004
+  sunLight.shadow.normalBias = 0.03
+  scene.add(sunLight, sunLight.target)
+
+  sky = new THREE.Mesh(
+    new THREE.SphereGeometry(320, 32, 15),
+    new THREE.ShaderMaterial({
+      uniforms: {
+        top:    { value: new THREE.Color('#3f9be8') },
+        mid:    { value: new THREE.Color('#9dd6fa') },
+        bottom: { value: new THREE.Color('#ffd9b4') }
+      },
+      vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+      fragmentShader: 'uniform vec3 top; uniform vec3 mid; uniform vec3 bottom; varying vec3 vDir; void main(){ float h = vDir.y; vec3 c = h < 0.0 ? bottom : (h < 0.22 ? mix(bottom, mid, h / 0.22) : mix(mid, top, min((h - 0.22) / 0.6, 1.0))); gl_FragColor = vec4(c, 1.0); }',
+      side: THREE.BackSide, depthWrite: false, fog: false
+    })
+  )
+  sky.renderOrder = -1
+  scene.add(sky)
+
+  const sunDisc = new THREE.Mesh(new THREE.CircleGeometry(11, 40), new THREE.MeshBasicMaterial({ color: col('#fff8dc'), fog: false }))
+  const sunHalo = new THREE.Mesh(new THREE.CircleGeometry(26, 40), new THREE.MeshBasicMaterial({ color: col('#fff0c2'), transparent: true, opacity: 0.32, fog: false, depthWrite: false }))
+  sunDisc.position.set(120, 62, -230)
+  sunHalo.position.copy(sunDisc.position)
+  sunDisc.lookAt(3, 2, 15); sunHalo.lookAt(3, 2, 15)
+  scene.add(sunDisc, sunHalo)
+
+  groundTex = makeGrassTexture()
+  const groundMat = groundTex
+    ? new THREE.MeshStandardMaterial({ map: groundTex, roughness: 1, metalness: 0 })
+    : new THREE.MeshStandardMaterial({ color: col('#7cc86a'), roughness: 1, metalness: 0 })
+  ground = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_W, GROUND_D), groundMat)
+  ground.rotation.x = -Math.PI / 2
+  ground.position.set(0, GROUND_Y, -60)
+  ground.receiveShadow = true
+  scene.add(ground)
+}
+
+function makeTree() {
+  const g = new THREE.Group()
+  const trunk = new THREE.Mesh(trunkGeo, trunkMat); trunk.position.y = 0.4; trunk.castShadow = true; g.add(trunk)
+  const mat = pick(leafMats)
+  if (Math.random() < 0.55) {
+    let y = 0.85; const tiers = 2 + Math.floor(Math.random() * 2)
+    for (let i = 0; i < tiers; i++) {
+      const r = 0.95 - i * 0.22, h = 1.15, c = new THREE.Mesh(coneGeo, mat)
+      c.scale.set(r, h, r); c.position.y = y + h / 2; c.castShadow = true; g.add(c); y += h * 0.55
+    }
+  } else {
+    const r = rand(0.8, 1.2), c = new THREE.Mesh(blobGeo, mat)
+    c.scale.set(r, r * 0.95, r); c.position.y = 0.75 + r * 0.8; c.castShadow = true; g.add(c)
+    if (Math.random() < 0.5) {
+      const r2 = r * 0.65, c2 = new THREE.Mesh(blobGeo, mat)
+      c2.scale.setScalar(r2); c2.position.set(rand(-0.4, 0.4), c.position.y + r * 0.55, rand(-0.3, 0.3)); c2.castShadow = true; g.add(c2)
+    }
+  }
+  g.scale.setScalar(rand(0.85, 1.5))
+  g.rotation.y = rand(0, Math.PI * 2)
+  return g
+}
+function makeBush() {
+  const g = new THREE.Group(), mat = pick(leafMats), n = 1 + Math.floor(Math.random() * 3)
+  for (let i = 0; i < n; i++) {
+    const r = rand(0.3, 0.55), b = new THREE.Mesh(blobGeo, mat)
+    b.scale.set(r * 1.2, r, r); b.position.set(rand(-0.4, 0.4), r * 0.7, rand(-0.25, 0.25)); b.castShadow = true; g.add(b)
+  }
+  const f = Math.floor(Math.random() * 4)
+  for (let i = 0; i < f; i++) {
+    const p = new THREE.Mesh(puffGeo, pick(flowerMats))
+    p.scale.setScalar(0.08); p.position.set(rand(-0.5, 0.5), rand(0.35, 0.7), rand(-0.3, 0.35)); g.add(p)
+  }
+  return g
+}
+function makeHill(mats, sx, sy, sz) {
+  const m = new THREE.Mesh(blobGeo, pick(mats))
+  m.scale.set(sx, sy, sz); m.rotation.y = rand(0, Math.PI * 2)
+  return m
+}
+function makeCloud() {
+  const g = new THREE.Group(), n = 3 + Math.floor(Math.random() * 4)
+  for (let i = 0; i < n; i++) {
+    const r = rand(1.2, 2.6), p = new THREE.Mesh(puffGeo, cloudMat)
+    p.scale.set(r * rand(1.1, 1.6), r * 0.7, r); p.position.set(i * rand(1.4, 2.4) - n, rand(-0.3, 0.6), rand(-0.6, 0.6)); g.add(p)
+  }
+  return g
+}
+
+function addProp(layer, g, x, y, z, speedMul, minX, spawnLo, spawnHi, drift) {
+  g.position.set(x, y, z); scene.add(g)
+  layer.push({ g, speedMul, minX, spawnLo, spawnHi, drift: drift || 0, zLo: z, zHi: z })
+}
+function initWorld() {
+  for (let i = 0; i < 26; i++) addProp(layers.near, makeTree(), rand(-26, 46), GROUND_Y, rand(-15, -5.5), 1, -27, 40, 50)
+  for (let i = 0; i < 14; i++) addProp(layers.near, makeBush(), rand(-26, 46), GROUND_Y, rand(2.6, 4.4), 1, -27, 40, 50)
+  layers.near.forEach((p, i) => { if (i < 26) { p.zLo = -15; p.zHi = -5.5 } else { p.zLo = 2.6; p.zHi = 4.4 } })
+  for (let i = 0; i < 10; i++) addProp(layers.mid, makeHill(hillMatsMid, rand(9, 16), rand(3.5, 6.5), rand(7, 10)), rand(-80, 100), GROUND_Y - 1, rand(-34, -22), 0.35, -85, 95, 120)
+  for (let i = 0; i < 10; i++) addProp(layers.far, makeHill(hillMatsFar, rand(24, 42), rand(6, 12), rand(12, 18)), rand(-120, 150), GROUND_Y - 1.5, rand(-95, -60), 0.12, -130, 140, 180)
+  for (let i = 0; i < 9; i++) addProp(layers.clouds, makeCloud(), rand(-60, 90), rand(5, 13), rand(-60, -25), 0.2, -75, 85, 110, rand(0.25, 0.6))
+  layers.mid.forEach(p => { p.zLo = -34; p.zHi = -22 })
+  layers.far.forEach(p => { p.zLo = -95; p.zHi = -60 })
+  layers.clouds.forEach(p => { p.zLo = -60; p.zHi = -25 })
+}
+
+function moveLayer(list, dx, dt) {
+  for (const p of list) {
+    p.g.position.x -= dx * p.speedMul + p.drift * dt
+    if (p.g.position.x < p.minX) {
+      p.g.position.x = rand(p.spawnLo, p.spawnHi)
+      p.g.position.z = rand(p.zLo, p.zHi)
+      if (list === layers.clouds) p.g.position.y = rand(5, 13)
+    }
+  }
+}
+function scrollWorld(dx, dt) {
+  if (groundTex) groundTex.offset.x += dx / TILE
+  moveLayer(layers.near, dx, dt)
+  moveLayer(layers.mid, dx, dt)
+  moveLayer(layers.far, dx, dt)
+  moveLayer(layers.clouds, dx, dt)
+}
+
+/* ===== pipe columns ===== */
+function makeMarker(parent) {
+  const g = new THREE.Group()
+  const star = new THREE.Mesh(starGeo, starMat); star.castShadow = true; g.add(star)
+  const thorn = new THREE.Group()
+  const core = new THREE.Mesh(coreGeo, thornMat); core.castShadow = true; thorn.add(core)
+  for (const d of spikeDirs) {
+    const sp = new THREE.Mesh(spikeGeo, spikeMat)
+    sp.position.copy(d).multiplyScalar(0.36)
+    sp.quaternion.setFromUnitVectors(UP, d)
+    thorn.add(sp)
+  }
+  g.add(thorn)
+  g.scale.setScalar(1.3)
+  g.visible = false; parent.add(g)
+  return { g, star, thorn, kind: null, phase: rand(0, 6.28) }
+}
+function makeColumn() {
+  const g = new THREE.Group()
+  const mk = (geo, mat) => { const m = new THREE.Mesh(geo, mat); m.castShadow = true; m.receiveShadow = true; g.add(m); return m }
+  const bodies = [], rims = [], markers = []
+  for (let i = 0; i <= MAX_GAPS; i++) bodies.push(mk(pipeGeo, pipeMat))
+  for (let i = 0; i < MAX_GAPS * 2; i++) rims.push(mk(rimGeo, rimMat))
+  for (let i = 0; i < MAX_GAPS; i++) markers.push(makeMarker(g))
+  g.position.x = 200; scene.add(g)
+  return { g, bodies, rims, markers, x: 200, gaps: [], segs: [], scored: true }
+}
+function placeColumn(c, x, gaps) {
+  c.x = x; c.g.position.x = x; c.scored = false
+  c.gaps = gaps.slice().sort((a, b) => a.y - b.y)
+  c.segs = []
+  let y0 = -22
+  c.gaps.forEach((gap, i) => {
+    const gb = gap.y - gap.size / 2, gt = gap.y + gap.size / 2
+    c.segs.push([y0, gb])
+    c.rims[i * 2].position.y = gb - RIM_H / 2 + 0.02
+    c.rims[i * 2 + 1].position.y = gt + RIM_H / 2 - 0.02
+    const m = c.markers[i]
+    m.kind = gap.marker || null
+    m.g.visible = !!m.kind
+    m.star.visible = m.kind === 'reward'
+    m.thorn.visible = m.kind === 'punish'
+    m.g.position.set(0, gap.y, 0)
+    y0 = gt
+  })
+  c.segs.push([y0, 26])
+  c.bodies.forEach((b, i) => {
+    const sg = c.segs[i]
+    b.visible = !!sg
+    if (sg) { b.scale.y = sg[1] - sg[0]; b.position.y = (sg[0] + sg[1]) / 2 }
+  })
+  c.rims.forEach((r, i) => { r.visible = i < c.gaps.length * 2 })
+  c.markers.forEach((m, i) => { if (i >= c.gaps.length) { m.g.visible = false; m.kind = null } })
+}
+function initPipes() { for (let i = 0; i < PIPE_COUNT; i++) pipes.push(makeColumn()) }
+
+const currentGap = () => Math.max(2.7, 3.5 - score * 0.03)
+const rollMarker = () => { const r = Math.random(); return r < 0.45 ? 'reward' : r < 0.8 ? 'punish' : null }
+function minTraverseGap() { return 3.75 * (DANGER_W / speed) ** 2 + 2 * BIRD_R }
+function maxAllowedGaps() {
+  const lo = GROUND_Y + 1.0, hi = CEIL_Y - 1.0, available = hi - lo
+  const minGap = minTraverseGap()
+  for (let n = MAX_GAPS; n >= 1; n--) {
+    let pg = (available - (n - 1) * MIN_MID) / n
+    if (n === 2) pg = Math.min(pg, 2.8)
+    pg = clamp(pg, BIRD_R * 3, currentGap())
+    if (pg >= minGap) return n
+  }
+  return 1
+}
+function spacingBounds() {
+  return [Math.max(S_FLOOR, DANGER_W + speed * 0.25), Math.min(S_CEIL, DANGER_W + speed * 1.0)]
+}
+function screenRight() {
+  return CAM_X + camDist * camera.aspect * Math.tan(camera.fov * 0.5 * DEG) + 2
+}
+function computeSpacing(prev, next) {
+  if (!prev || !prev.length) return S_FLOOR
+  let minS = Infinity, maxS = 0
+  for (const p of prev) for (const n of next) {
+    const dy = n.y - p.y
+    const s = DANGER_W + speed * (dy >= 0 ? dy / CLIMB_RATE : -dy / FALL_RATE)
+    if (s < minS) minS = s
+    if (s > maxS) maxS = s
+  }
+  return Math.max(S_FLOOR, lerp(minS, maxS, 0.35) + 0.05)
+}
+function pickGapCount() {
+  if (columnsMade <= WARMUP_COLUMNS) return 1
+  const tiers = [
+    [1, 1.0],
+    [2, score >= 3  ? Math.min(1.0, (score - 3) * 0.08) : 0],
+    [3, score >= 10 ? Math.min(0.7, (score - 10) * 0.04) : 0],
+    [4, score >= 20 ? Math.min(0.4, (score - 20) * 0.025) : 0],
+    [5, score >= 35 ? Math.min(0.2, (score - 35) * 0.015) : 0],
+  ]
+  const total = tiers.reduce((s, tt) => s + tt[1], 0)
+  let r = Math.random() * total
+  for (const [n, w] of tiers) { r -= w; if (r <= 0) return Math.min(n, maxAllowedGaps()) }
+  return 1
+}
+function makeGaps(prevGaps) {
+  const lo = GROUND_Y + 1.0, hi = CEIL_Y - 1.0, available = hi - lo
+  columnsMade++
+  const [, sMax] = spacingBounds()
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const nGaps = pickGapCount()
+    let gaps
+    if (nGaps === 1) {
+      const gap = currentGap()
+      const baseWalk = lastGapCount >= 3 ? 1.5 : lastGapCount === 2 ? 2.2 : 3
+      const walk = baseWalk * (0.6 ** attempt)
+      const y = clamp(lastGapY + rand(-walk, walk), lo + gap / 2, Math.min(hi - gap / 2, 4.4))
+      gaps = [{ y, size: gap, marker: null }]
+    } else {
+      const baseGap = currentGap()
+      let perGap = (available - (nGaps - 1) * MIN_MID) / nGaps
+      if (nGaps === 2) perGap = Math.min(perGap, 2.8)
+      perGap = clamp(perGap, BIRD_R * 3, baseGap)
+      const midCount = nGaps - 1
+      const midSize = clamp((available - nGaps * perGap) / midCount, MIN_MID, 1.0)
+      const slack = Math.max(0, available - nGaps * perGap - midCount * midSize)
+      let b0
+      if (slack > 0.01) {
+        const stride = perGap + midSize
+        const biasY = clamp(lastGapY, 0.5, 2.0)
+        let idealB0 = lo, bestD = Infinity
+        for (let j = 0; j < nGaps; j++) {
+          const ib = biasY - perGap / 2 - j * stride
+          const cb = clamp(ib, lo, lo + slack)
+          const d = Math.abs(cb + perGap / 2 + j * stride - biasY) + j * 0.6
+          if (d < bestD) { bestD = d; idealB0 = cb }
+        }
+        b0 = clamp(idealB0 + rand(-slack * 0.15, slack * 0.15), lo, lo + slack)
+      } else {
+        b0 = lo
+      }
+      gaps = []
+      let y = b0
+      for (let i = 0; i < nGaps; i++) {
+        gaps.push({ y: y + perGap / 2, size: perGap, marker: rollMarker() })
+        y += perGap + (i < midCount ? midSize : 0)
+      }
+      if (gaps.every(g => !g.marker)) gaps[Math.floor(Math.random() * nGaps)].marker = Math.random() < 0.6 ? 'reward' : 'punish'
+    }
+    if (!prevGaps || !prevGaps.length || computeSpacing(prevGaps, gaps) <= sMax) {
+      lastGapY = gaps.reduce((b, g) => Math.abs(g.y - lastGapY) < Math.abs(b.y - lastGapY) ? g : b).y
+      lastGapCount = gaps.length
+      return gaps
+    }
+  }
+  const gap = currentGap()
+  const safeY = prevGaps.length ? prevGaps[Math.floor(prevGaps.length / 2)].y : 1.2
+  const y = clamp(safeY + rand(-0.5, 0.5), lo + gap / 2, Math.min(hi - gap / 2, 4.4))
+  lastGapY = y; lastGapCount = 1
+  return [{ y, size: gap, marker: null }]
+}
+function parkPipes() { for (const c of pipes) { c.x = 200; c.g.position.x = 200; c.scored = true } }
+function animateMarkers(dt) {
+  for (const c of pipes) {
+    if (c.x > 60 || c.x < -20) continue
+    c.markers.forEach((m, i) => {
+      if (!m.g.visible) return
+      m.g.rotation.y += dt * 2.2
+      m.g.position.y = c.gaps[i].y + Math.sin(t * 3 + m.phase) * 0.12
+      if (m.kind === 'punish') m.thorn.rotation.x += dt * 0.9
+    })
+  }
+}
+
+/* ===== gap effects ===== */
+const GAP_EFFECTS = {
+  reward: { label: 'Reward', toast: 'reward', apply() {} },
+  punish: { label: 'Trap',   toast: 'punish', apply() {} }
+}
+function showToast(kind, text) {
+  if (!pageSelf) return
+  pageSelf.setData({ showToast: true, toastKind: kind, toastText: text })
+  if (pageSelf._toastTimer) clearTimeout(pageSelf._toastTimer)
+  pageSelf._toastTimer = setTimeout(() => {
+    if (pageSelf) pageSelf.setData({ showToast: false })
+  }, 1100)
+}
+function triggerGap(c, i) {
+  const gap = c.gaps[i], m = c.markers[i], fx = gap.marker && GAP_EFFECTS[gap.marker]
+  if (!fx) return
+  m.g.visible = false
+  if (gap.marker === 'reward') { Sfx.reward(); emit('dot', 16, 0.3, gap.y, 0, [pMats.gold, pMats.white], 3.5, 0.7, -5, 2) }
+  else { Sfx.punish(); emit('dot', 16, 0.3, gap.y, 0, [pMats.purple, pMats.violet], 3, 0.7, -4, 1.5); shake = Math.max(shake, 0.35) }
+  showToast(fx.toast, (gap.marker === 'reward' ? '★ ' : '✖ ') + fx.label)
+  fx.apply({ column: c, opening: gap, index: i, score, addPoints: n => addScore(n), die })
+}
+
+/* ===== bird ===== */
+function initBird() {
+  const matGold = std('#ffb347', { roughness: 0.6 }), matOrange = std('#f28c28', { roughness: 0.65 }), matCream = std('#fff1d0', { roughness: 0.7 })
+  const matBeak = std('#ff6b35', { roughness: 0.5 }), matWhite = std('#ffffff', { roughness: 0.4, flatShading: false }), matInk = std('#1f2b3d', { roughness: 0.3, flatShading: false })
+
+  bird = new THREE.Group()
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 9), matGold)
+  body.scale.set(1.12, 0.95, 1); body.castShadow = true; bird.add(body)
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), matCream)
+  belly.position.set(0.12, -0.15, 0); belly.scale.set(1.05, 0.85, 0.95); bird.add(belly)
+  for (const side of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.15, 12, 10), matWhite)
+    eye.position.set(0.3, 0.17, side * 0.27); bird.add(eye)
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), matInk)
+    pupil.position.set(0.41, 0.19, side * 0.31); bird.add(pupil)
+    const pivot = new THREE.Group()
+    pivot.position.set(-0.05, 0.1, side * 0.36)
+    const wing = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.8, 5), matOrange)
+    wing.rotation.x = side * Math.PI / 2
+    wing.scale.set(1.35, 1, 0.32)
+    wing.position.z = side * 0.4
+    wing.castShadow = true
+    pivot.add(wing); bird.add(pivot)
+    if (side < 0) wingL = pivot; else wingR = pivot
+  }
+  const beak = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.4, 6), matBeak)
+  beak.rotation.z = -Math.PI / 2; beak.position.set(0.58, -0.02, 0); bird.add(beak)
+  const tail = new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.5, 5), matOrange)
+  tail.rotation.z = Math.PI / 2; tail.position.set(-0.6, 0.06, 0); tail.scale.set(1, 1, 0.4); tail.castShadow = true; bird.add(tail)
+  for (const [dz, rz] of [[-0.06, 0.55], [0.06, 0.2]]) {
+    const crest = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.3, 5), matOrange)
+    crest.position.set(0.02, 0.5, dz); crest.rotation.z = rz; bird.add(crest)
+  }
+  bird.scale.setScalar(1.12)
+  scene.add(bird)
+}
+
+/* ===== particles ===== */
+function initParticles() {
+  const makePool = (geo, n, kind) => {
+    for (let i = 0; i < n; i++) {
+      const m = new THREE.Mesh(geo, pMats.gold); m.visible = false; scene.add(m)
+      particles.push({ m, v: new THREE.Vector3(), av: new THREE.Vector3(), life: 0, max: 1, grav: 0, kind })
+    }
+  }
+  makePool(dotGeo, 60, 'dot')
+  makePool(featherGeo, 18, 'feather')
+}
+function emit(kind, n, x, y, z, mats, spd, life, grav, up) {
+  let c = 0
+  for (const p of particles) {
+    if (c >= n) break
+    if (p.life > 0 || p.kind !== kind) continue
+    p.m.visible = true; p.m.material = pick(mats)
+    p.m.position.set(x + rand(-0.25, 0.25), y + rand(-0.25, 0.25), z + rand(-0.25, 0.25))
+    p.m.rotation.set(rand(0, 6), rand(0, 6), rand(0, 6))
+    const a = rand(0, Math.PI * 2), k = rand(0.35, 1)
+    p.v.set(Math.cos(a) * k * spd, up + Math.abs(Math.sin(a)) * k * spd * 0.8, Math.sin(a) * k * spd * 0.6)
+    p.av.set(rand(-9, 9), rand(-9, 9), rand(-9, 9))
+    p.life = p.max = life * rand(0.7, 1.2); p.grav = grav; c++
+  }
+}
+function updateParticles(dt) {
+  for (const p of particles) {
+    if (p.life <= 0) continue
+    p.life -= dt
+    if (p.life <= 0) { p.m.visible = false; continue }
+    p.v.y += p.grav * dt
+    p.m.position.addScaledVector(p.v, dt)
+    const k = p.life / p.max
+    if (p.kind === 'feather') {
+      p.m.rotation.x += p.av.x * dt; p.m.rotation.y += p.av.y * dt; p.m.rotation.z += p.av.z * dt
+      p.v.multiplyScalar(Math.max(0, 1 - 1.8 * dt))
+      p.m.scale.setScalar(Math.max(0.001, Math.min(1, k * 4)))
+    } else {
+      p.m.scale.setScalar(Math.max(0.001, k))
+    }
+  }
+}
+function clearParticles() { for (const p of particles) { p.life = 0; p.m.visible = false } }
+
+/* ===== game state ===== */
+function hitRect(cx, cy, r, x1, x2, y1, y2) {
+  const nx = clamp(cx, x1, x2), ny = clamp(cy, y1, y2), dx = cx - nx, dy = cy - ny
+  return dx * dx + dy * dy < r * r
+}
+function setMedal(s) {
+  const tiers = [[40, 'Platinum medal', '#e3ecf5'], [30, 'Gold medal', '#ffcc33'], [20, 'Silver medal', '#c9d3dd'], [10, 'Bronze medal', '#cd8b56']]
+  const m = tiers.find(x => s >= x[0])
+  if (pageSelf) {
+    pageSelf.setData({
+      showMedal: !!m,
+      medalText: m ? m[1] : '',
+      medalColor: m ? m[2] : ''
+    })
+  }
+}
+
+function selectMode(mode) {
+  gameMode = mode
+  showingModeInfo = true
+  const descLines = mode === 'competitive'
+    ? ['Tap to flap', 'One life — fly as far as you can', 'Multi-gap pipes: pick your opening', '★ Star = Reward   ✖ Thorn = Trap']
+    : ['Tap to flap', '3 lives — respawn after each hit', 'Brief shield after respawning', 'Multi-gap pipes: pick your opening', '★ Star = Reward   ✖ Thorn = Trap']
+  pageSelf.setData({
+    showModeSelect: false,
+    showModeInfo: true,
+    modeInfoTitle: mode === 'competitive' ? 'Competitive' : 'Casual',
+    modeInfoLines: descLines
+  })
+}
+function startFromModeInfo() {
+  showingModeInfo = false
+  pageSelf.setData({ showModeInfo: false })
+  gameStart()
+}
+function returnToModes() {
+  showingModeInfo = false
+  gameMode = null
+  pageSelf.setData({ showModeInfo: false, showModeSelect: true })
+}
+function findSafeY() {
+  let bestC = null, bestX = Infinity
+  for (const c of pipes) {
+    if (c.x > -3 && c.x < 50 && c.x < bestX) { bestC = c; bestX = c.x }
+  }
+  if (bestC && bestC.gaps.length) {
+    let closest = bestC.gaps[0], dist = Infinity
+    for (const g of bestC.gaps) {
+      const d = Math.abs(birdY - g.y)
+      if (d < dist) { dist = d; closest = g }
+    }
+    return clamp(closest.y, GROUND_Y + BIRD_R + 0.5, CEIL_Y - 0.5)
+  }
+  return 1.2
+}
+function updateLivesDisplay() {
+  if (!pageSelf) return
+  const arr = []
+  for (let i = 0; i < MAX_LIVES; i++) arr.push(i < lives)
+  pageSelf.setData({ livesActive: arr })
+}
+
+function gameStart() {
+  state = 'playing'; score = 0; speed = 6; lastGapY = 1.2; columnsMade = 0; lastGapCount = 1; lastPlacedGaps = []; vy = 0
+  invincible = 0; if (bird) bird.visible = true
+  if (gameMode === 'casual') { lives = MAX_LIVES; updateLivesDisplay() }
+  else { lives = 0 }
+  pageSelf.setData({ gameState: 'playing', score: 0, showOver: false, showToast: false, showLives: gameMode === 'casual' })
+  let x = START_X
+  for (let i = 0; i < PIPE_COUNT; i++) {
+    const gaps = makeGaps(lastPlacedGaps)
+    if (i > 0) { const [sMin, sMax] = spacingBounds(); x += clamp(computeSpacing(lastPlacedGaps, gaps), sMin, sMax) }
+    placeColumn(pipes[i], x, gaps)
+    lastPlacedGaps = gaps
+  }
+  Sfx.swoosh()
+  gameFlap()
+}
+function gameFlap() {
+  vy = FLAP_V; flapBoost = 1
+  Sfx.flap()
+  emit('dot', 3, -0.4, birdY - 0.2, 0, [pMats.white], 1.2, 0.35, -2, -0.5)
+}
+function addScore(n) {
+  n = n || 1
+  score += n
+  pageSelf.setData({ score, scorePop: true })
+  setTimeout(() => { if (pageSelf) pageSelf.setData({ scorePop: false }) }, 300)
+  speed = 6 + Math.min(score, 40) * 0.06
+  Sfx.score()
+  emit('dot', 10, 0.2, birdY, 0, [pMats.gold, pMats.white, pMats.pink], 3.2, 0.6, -6, 2)
+}
+function die() {
+  if (state !== 'playing') return
+  if (invincible > 0) return
+  if (gameMode === 'casual' && lives > 1) {
+    lives--
+    updateLivesDisplay()
+    Sfx.hit()
+    shake = 0.5
+    emit('feather', 8, 0, birdY, 0, [pMats.orange, pMats.cream], 3, 1, -5, 2)
+    birdY = findSafeY()
+    vy = 0
+    if (bird) bird.rotation.z = 0
+    invincible = INVINCIBLE_TIME
+    Sfx.swoosh()
+    return
+  }
+  if (gameMode === 'casual') { lives--; updateLivesDisplay() }
+  state = 'dead'; deathTime = t; shake = 0.7; vy = Math.max(vy * 0.3, 3.5)
+  Sfx.hit()
+  emit('feather', 16, 0, birdY, 0, [pMats.orange, pMats.cream, pMats.gold], 4.5, 1.7, -7, 3)
+  emit('dot', 12, 0, birdY, 0, [pMats.white], 3, 0.5, -4, 1)
+  const best = pageSelf._best
+  const isNew = score > best
+  if (isNew) {
+    pageSelf._best = score
+    try { wx.setStorageSync('flappy-dawn-best', String(score)) } catch (e) {}
+  }
+  setMedal(score)
+  pageSelf.setData({ gameState: 'dead', best: pageSelf._best, isNewBest: isNew && score > 0 })
+  setTimeout(() => {
+    if (state === 'dead' && pageSelf) pageSelf.setData({ showOver: true })
+  }, 750)
+}
+function reset() {
+  state = 'ready'; readyT = 0; score = 0; vy = 0; birdY = 1; bird.rotation.z = 0
+  invincible = 0; bird.visible = true
+  lives = 0; showingModeInfo = false; gameMode = null
+  pageSelf.setData({ gameState: 'ready', score: 0, showOver: false, showToast: false, showLives: false, showModeSelect: true, showModeInfo: false, best: pageSelf._best, showBest: pageSelf._best > 0 })
+  parkPipes(); clearParticles()
+}
+function action() {
+  const now = Date.now()
+  if (now - lastAction < 120) return
+  lastAction = now
+  ensureAudio(pageSelf._muted)
+  if (state === 'ready') {
+    if (showingModeInfo) startFromModeInfo()
+  }
+  else if (state === 'playing') gameFlap()
+  else if (state === 'dead' && t - deathTime > 0.7) reset()
+}
+
+/* ===== main loop ===== */
+function updatePlaying(dt) {
+  if (invincible > 0) { invincible -= dt; if (invincible <= 0) invincible = 0 }
+  const steps = 2, h = dt / steps
+  for (let i = 0; i < steps; i++) {
+    vy = Math.max(vy + GRAVITY * h, MAX_FALL)
+    birdY += vy * h
+    if (birdY > CEIL_Y) { birdY = CEIL_Y; vy = Math.min(vy, 0) }
+  }
+  const dx = speed * dt
+  scrollWorld(dx, dt)
+  let maxX = -Infinity
+  for (const c of pipes) { c.x -= dx; c.g.position.x = c.x; maxX = Math.max(maxX, c.x) }
+
+  if (birdY - BIRD_R < GROUND_Y + 0.05) { birdY = GROUND_Y + BIRD_R; die(); return }
+  for (const c of pipes) {
+    if (Math.abs(c.x) > 2.6) continue
+    const r1 = c.x - PIPE_R, r2 = c.x + PIPE_R, m1 = c.x - RIM_R + 0.04, m2 = c.x + RIM_R - 0.04
+    for (const sg of c.segs) if (hitRect(0, birdY, BIRD_R, r1, r2, sg[0], sg[1])) { die(); return }
+    for (const g of c.gaps) {
+      const gb = g.y - g.size / 2, gt = g.y + g.size / 2
+      if (hitRect(0, birdY, BIRD_R, m1, m2, gb - RIM_H, gb) || hitRect(0, birdY, BIRD_R, m1, m2, gt, gt + RIM_H)) { die(); return }
+    }
+  }
+  for (const c of pipes) {
+    if (!c.scored && c.x < 0) {
+      c.scored = true
+      const i = c.gaps.findIndex(g => birdY >= g.y - g.size / 2 && birdY <= g.y + g.size / 2)
+      addScore()
+      if (i >= 0) triggerGap(c, i)
+    }
+    if (c.x < -16) {
+      const gaps = makeGaps(lastPlacedGaps)
+      const [sMin, sMax] = spacingBounds()
+      maxX = Math.max(maxX + clamp(computeSpacing(lastPlacedGaps, gaps), sMin, sMax), screenRight())
+      placeColumn(c, maxX, gaps)
+      lastPlacedGaps = gaps
+    }
+  }
+}
+
+function frame(canvas, now) {
+  rafId = canvas.requestAnimationFrame((ts) => frame(canvas, ts))
+  if (!last) { last = now; return }
+  const dt = Math.min((now - last) / 1000, 0.05); last = now; t += dt
+
+  if (state === 'ready') {
+    readyT += dt
+    birdY = 1 + Math.sin(readyT * 2.6) * 0.22
+    bird.rotation.z = Math.sin(readyT * 2.6 + 0.6) * 0.1
+    scrollWorld(2.4 * dt, dt)
+  } else if (state === 'playing') {
+    updatePlaying(dt)
+    const target = clamp(vy * 0.075, -1.35, 0.5)
+    bird.rotation.z = lerp(bird.rotation.z, target, vy > 0 ? 1 - Math.exp(-14 * dt) : 1 - Math.exp(-5 * dt))
+  } else {
+    vy += GRAVITY * dt; birdY += vy * dt
+    if (birdY < GROUND_Y + 0.45) { birdY = GROUND_Y + 0.45; vy = 0 }
+    bird.rotation.z = lerp(bird.rotation.z, -1.75, 1 - Math.exp(-6 * dt))
+    moveLayer(layers.clouds, 0, dt)
+  }
+  bird.position.y = birdY
+
+  if (invincible > 0 && state === 'playing') {
+    bird.visible = Math.floor(invincible * 8) % 2 === 0
+  } else {
+    bird.visible = true
+  }
+
+  flapPhase += dt * (state === 'playing' ? 16 : state === 'dead' ? 0 : 6)
+  flapBoost = Math.max(0, flapBoost - dt * 2.5)
+  const amp = (state === 'ready' ? 0.35 : 0.45) + flapBoost * 0.6
+  const wa = Math.sin(flapPhase) * amp + 0.15
+  wingR.rotation.x = -wa; wingL.rotation.x = wa
+
+  animateMarkers(dt)
+  updateParticles(dt)
+
+  shake = Math.max(0, shake - dt * 1.6)
+  const sx = (Math.random() - 0.5) * shake * 0.6, sy = (Math.random() - 0.5) * shake * 0.6
+  camY = lerp(camY, 2.2 + (birdY - 1) * 0.35, 1 - Math.exp(-5 * dt))
+  camera.position.set(CAM_X + sx, camY + sy, camDist)
+  lookTarget.x = CAM_LOOK_X; lookTarget.y = camY - 0.9; lookTarget.z = 0
+  camera.lookAt(lookTarget)
+  sky.position.copy(camera.position)
+
+  renderer.render(scene, camera)
+}
+
+/* ===== Page ===== */
+Page({
+  data: {
+    gameState: 'ready',
+    score: 0,
+    best: 0,
+    showBest: false,
+    muted: false,
+    showOver: false,
+    showMedal: false,
+    medalText: '',
+    medalColor: '',
+    isNewBest: false,
+    toastText: '',
+    toastKind: '',
+    showToast: false,
+    scorePop: false,
+    showModeSelect: true,
+    showModeInfo: false,
+    modeInfoTitle: '',
+    modeInfoLines: [],
+    showLives: false,
+    livesActive: [true, true, true],
+  },
+
+  onLoad() {
+    pageSelf = this
+    let best = 0, muted = false
+    try { best = parseInt(wx.getStorageSync('flappy-dawn-best') || '0', 10) || 0 } catch (e) {}
+    try { muted = wx.getStorageSync('flappy-dawn-muted') === '1' } catch (e) {}
+    this._best = best
+    this._muted = muted
+    this._toastTimer = null
+    this.setData({ best, showBest: best > 0, muted })
+  },
+
+  onReady() {
+    const query = wx.createSelectorQuery()
+    query.select('#webgl').node().exec((res) => {
+      if (!res || !res[0]) {
+        console.error('Canvas node not found')
+        return
+      }
+      const canvas = res[0].node
+      this._canvas = canvas
+
+      const info = wx.getSystemInfoSync()
+      const dpr = Math.min(info.pixelRatio || 1, 2)
+      const w = info.windowWidth, h = info.windowHeight
+      canvas.width = w * dpr
+      canvas.height = h * dpr
+
+      THREE = createScopedThreejs(canvas)
+      col = hex => new THREE.Color(hex).convertSRGBToLinear()
+      lookTarget = new THREE.Vector3()
+
+      initMaterials()
+      initScene(canvas, w, h, dpr)
+      initWorld()
+      initPipes()
+      initBird()
+      initParticles()
+
+      last = 0
+      rafId = canvas.requestAnimationFrame((ts) => frame(canvas, ts))
+    })
+  },
+
+  onUnload() {
+    if (rafId && this._canvas) {
+      this._canvas.cancelAnimationFrame(rafId)
+      rafId = null
+    }
+    if (this._toastTimer) clearTimeout(this._toastTimer)
+    if (audioCtx) {
+      try { audioCtx.close() } catch (e) {}
+      audioCtx = null; masterGain = null
+    }
+    pageSelf = null
+  },
+
+  onTouchStart(e) {
+    action()
+  },
+
+  onPlayAgain() {
+    action()
+  },
+
+  onToggleMute() {
+    this._muted = !this._muted
+    try { wx.setStorageSync('flappy-dawn-muted', this._muted ? '1' : '0') } catch (e) {}
+    setAudioMuted(this._muted)
+    this.setData({ muted: this._muted })
+  },
+
+  onSelectCompetitive() {
+    selectMode('competitive')
+  },
+  onSelectCasual() {
+    selectMode('casual')
+  },
+  onEnterGame() {
+    ensureAudio(this._muted)
+    startFromModeInfo()
+  },
+  onReturnToModes() {
+    returnToModes()
+  },
+})

@@ -1,0 +1,8 @@
+{
+  "name": "flappy-dawn-miniprogram",
+  "version": "1.0.0",
+  "description": "Flappy Dawn WeChat Mini Program",
+  "dependencies": {
+    "threejs-miniprogram": "0.0.8"
+  }
+}

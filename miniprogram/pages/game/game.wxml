@@ -1,0 +1,70 @@
+<view class="container">
+  <canvas type="webgl" id="webgl" class="game-canvas"
+    bindtouchstart="onTouchStart"></canvas>
+
+  <view class="hud">
+    <view wx:if="{{gameState !== 'ready'}}"
+      class="score display">{{score}}</view>
+
+    <view wx:if="{{showToast}}" class="toast {{toastKind}}">{{toastText}}</view>
+
+    <view wx:if="{{showLives && gameState === 'playing'}}" class="lives-display">
+      <view wx:for="{{livesActive}}" wx:key="index"
+        class="life {{item ? '' : 'lost'}}">♥</view>
+    </view>
+
+    <view wx:if="{{gameState === 'ready' && showModeSelect}}" class="title-wrap">
+      <view class="title-text display">Flappy Dawn</view>
+      <view class="mode-buttons">
+        <view class="mode-btn" catchtap="onSelectCompetitive">
+          <view class="mode-icon">⚔</view>
+          <view class="mode-name">Competitive</view>
+          <view class="mode-sub">One life, pure skill</view>
+        </view>
+        <view class="mode-btn" catchtap="onSelectCasual">
+          <view class="mode-icon">♥</view>
+          <view class="mode-name">Casual</view>
+          <view class="mode-sub">3 lives, keep trying</view>
+        </view>
+      </view>
+      <view wx:if="{{best > 0}}" class="chip small">
+        Best {{best}}
+      </view>
+    </view>
+
+    <view wx:if="{{gameState === 'ready' && showModeSelect}}" class="hint">
+      Choose a mode to start
+    </view>
+
+    <view wx:if="{{showModeInfo}}" class="card">
+      <view class="eyebrow">{{modeInfoTitle}}</view>
+      <view class="mode-desc">
+        <view wx:for="{{modeInfoLines}}" wx:key="index" class="mode-line">• {{item}}</view>
+      </view>
+      <view class="mode-actions">
+        <view class="btn mode-enter-btn" catchtap="onEnterGame">Enter</view>
+        <view class="btn-back" catchtap="onReturnToModes">Return</view>
+      </view>
+    </view>
+
+    <view wx:if="{{showOver}}" class="card">
+      <view class="eyebrow">Ouch!</view>
+      <view class="stats">
+        <view class="stat">
+          <view class="lbl">Score</view>
+          <view class="num">{{score}}</view>
+        </view>
+        <view class="stat">
+          <view class="lbl">Best</view>
+          <view class="num">{{best}}</view>
+        </view>
+      </view>
+      <view wx:if="{{isNewBest && score > 0}}" class="ribbon">New best!</view>
+      <view class="btn" catchtap="onPlayAgain">Play again</view>
+    </view>
+
+    <view class="mute-btn" catchtap="onToggleMute">
+      <view class="mute-icon">{{muted ? 'M' : 'S'}}</view>
+    </view>
+  </view>
+</view>

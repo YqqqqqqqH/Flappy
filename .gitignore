@@ -1,0 +1,13 @@
+# npm (run `npm install` in miniprogram/, then 工具 → 构建 npm in WeChat DevTools)
+node_modules/
+miniprogram/miniprogram_npm/
+
+# WeChat DevTools per-machine settings
+project.private.config.json
+
+# local Claude Code settings
+.claude/settings.local.json
+
+__pycache__/
+.DS_Store
+Thumbs.db
